@@ -51,28 +51,7 @@ jobs:
       - name: Setup ORAS
         uses: oras-project/setup-oras@v1
 
-      - name: Login to Factory GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.FACTORY_PULL_TOKEN }}
 
-      - name: Pull Factory Artifacts
-        run: |
-          echo "Pulling latest kernel..."
-          oras pull ghcr.io/${{ github.repository_owner }}/factory/kernel:latest
-          
-          echo "Pulling latest data-science rootfs..."
-          oras pull ghcr.io/${{ github.repository_owner }}/factory/rootfs-ds:latest
-          
-          # ORAS drops path by default. Artifacts should be in current dir.
-          # Rename to the expected output names for the release bundle.
-          cp dist/vmlinux.release release_dist/vmlinux_linux_amd64
-          cp dist/rootfs-data-science.cpio.gz release_dist/rootfs.cpio.gz
-          cp dist/rootfs-data-science.cpio.gz release_dist/rootfs.cpio # Maintain compat with verify script expecting this fallback
-          
-          ls -lah release_dist/
 
       - name: Generate Checksums
         working-directory: ./release_dist
@@ -100,8 +79,6 @@ jobs:
           push_output="$(oras push "${OCI_IMAGE}:${OCI_TAG}" \
             --artifact-type application/vnd.tensorpath.enclave.runtime.bundle.v1 \
             release_dist/enclave_linux_amd64:application/vnd.tensorpath.enclave.binary \
-            release_dist/vmlinux_linux_amd64:application/vnd.tensorpath.linux.kernel \
-            release_dist/rootfs.cpio.gz:application/vnd.tensorpath.guest.rootfs \
             release_dist/checksums.txt:text/plain \
             release_dist/build_manifest.txt:text/plain \
             --annotation "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
@@ -140,17 +117,45 @@ jobs:
             --predicate release_dist/attestation-predicate.json \
             "${OCI_IMAGE}@${OCI_DIGEST}"
 
+      - name: Generate Component Index
+        run: |
+          cat > release_dist/index.json <<EOF
+          {
+            "service": "tensorpath-hub",
+            "version": "0.1.0",
+            "updated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "latest": {
+              "tag": "${GITHUB_REF_NAME}",
+              "oci_image": "${OCI_IMAGE}",
+              "oci_digest": "${OCI_DIGEST}",
+              "github_release_url": "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}",
+              "build_provenance_url": "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/attestation-statement.json",
+              "artifacts": {
+                "enclave_linux_amd64": "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/enclave_linux_amd64",
+                "checksums.txt": "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/checksums.txt",
+                "build_manifest.txt": "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/build_manifest.txt",
+                "attestation_predicate.json": "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/attestation-predicate.json",
+                "attestation_statement.json": "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/attestation-statement.json"
+              },
+              "components": {
+                "kernel": "ghcr.io/${{ github.repository_owner }}/factory/kernel:latest",
+                "rootfs-base": "ghcr.io/${{ github.repository_owner }}/factory/rootfs-base:latest",
+                "rootfs-ds": "ghcr.io/${{ github.repository_owner }}/factory/rootfs-ds:latest"
+              }
+            }
+          }
+          EOF
+
       - name: Upload Build Provenance Attestation
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: |
             release_dist/enclave_linux_amd64
-            release_dist/vmlinux_linux_amd64
-            release_dist/rootfs.cpio.gz
             release_dist/checksums.txt
             release_dist/build_manifest.txt
             release_dist/attestation-predicate.json
             release_dist/attestation-statement.json
+            release_dist/index.json
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -158,11 +163,10 @@ jobs:
         with:
           files: |
             release_dist/enclave_linux_amd64
-            release_dist/vmlinux_linux_amd64
-            release_dist/rootfs.cpio.gz
             release_dist/checksums.txt
             release_dist/build_manifest.txt
             release_dist/attestation-predicate.json
             release_dist/attestation-statement.json
+            release_dist/index.json
 
 
