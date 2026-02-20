@@ -68,9 +68,9 @@ jobs:
           
           # ORAS drops path by default. Artifacts should be in current dir.
           # Rename to the expected output names for the release bundle.
-          cp vmlinux.release release_dist/vmlinux_linux_amd64
-          cp rootfs-data-science.cpio.gz release_dist/rootfs.cpio.gz
-          cp rootfs-data-science.cpio.gz release_dist/rootfs.cpio # Maintain compat with verify script expecting this fallback
+          cp dist/vmlinux.release release_dist/vmlinux_linux_amd64
+          cp dist/rootfs-data-science.cpio.gz release_dist/rootfs.cpio.gz
+          cp dist/rootfs-data-science.cpio.gz release_dist/rootfs.cpio # Maintain compat with verify script expecting this fallback
           
           ls -lah release_dist/
 
