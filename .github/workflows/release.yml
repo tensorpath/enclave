@@ -48,14 +48,38 @@ jobs:
             echo "runner=${RUNNER_OS}/${RUNNER_ARCH}"
           } > release_dist/build_manifest.txt
 
+      - name: Setup ORAS
+        uses: oras-project/setup-oras@v1
+
+      - name: Login to Factory GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.FACTORY_PULL_TOKEN }}
+
+      - name: Pull Factory Artifacts
+        run: |
+          echo "Pulling latest kernel..."
+          oras pull ghcr.io/${{ github.repository_owner }}/factory/kernel:latest
+          
+          echo "Pulling latest data-science rootfs..."
+          oras pull ghcr.io/${{ github.repository_owner }}/factory/rootfs-ds:latest
+          
+          # ORAS drops path by default. Artifacts should be in current dir.
+          # Rename to the expected output names for the release bundle.
+          cp vmlinux.release release_dist/vmlinux_linux_amd64
+          cp rootfs-data-science.cpio.gz release_dist/rootfs.cpio.gz
+          cp rootfs-data-science.cpio.gz release_dist/rootfs.cpio # Maintain compat with verify script expecting this fallback
+          
+          ls -lah release_dist/
+
       - name: Generate Checksums
         working-directory: ./release_dist
         run: |
           sha256sum * > checksums.txt
           cat checksums.txt
 
-      - name: Setup ORAS
-        uses: oras-project/setup-oras@v1
 
       - name: Setup Cosign
         uses: sigstore/cosign-installer@v3
@@ -76,6 +100,8 @@ jobs:
           push_output="$(oras push "${OCI_IMAGE}:${OCI_TAG}" \
             --artifact-type application/vnd.tensorpath.enclave.runtime.bundle.v1 \
             release_dist/enclave_linux_amd64:application/vnd.tensorpath.enclave.binary \
+            release_dist/vmlinux_linux_amd64:application/vnd.tensorpath.linux.kernel \
+            release_dist/rootfs.cpio.gz:application/vnd.tensorpath.guest.rootfs \
             release_dist/checksums.txt:text/plain \
             release_dist/build_manifest.txt:text/plain \
             --annotation "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
@@ -119,6 +145,8 @@ jobs:
         with:
           subject-path: |
             release_dist/enclave_linux_amd64
+            release_dist/vmlinux_linux_amd64
+            release_dist/rootfs.cpio.gz
             release_dist/checksums.txt
             release_dist/build_manifest.txt
             release_dist/attestation-predicate.json
@@ -130,6 +158,8 @@ jobs:
         with:
           files: |
             release_dist/enclave_linux_amd64
+            release_dist/vmlinux_linux_amd64
+            release_dist/rootfs.cpio.gz
             release_dist/checksums.txt
             release_dist/build_manifest.txt
             release_dist/attestation-predicate.json
