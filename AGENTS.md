@@ -5,16 +5,17 @@ Use this file as a map for Enclave work. Keep detailed rationale in docs, not he
 ## Load First
 
 - `docs/runtime_contract.md`
+- `README.md`
 
 ## Scope
 
-Enclave is the trusted Execution Plane:
+Enclave is the trusted Execution Plane (Host Orchestrator):
 
 - Firecracker host orchestration
-- guest-init runtime and BPF capture
 - policy extraction/evaluation/compilation/enforcement
 - audit persistence and WebSocket broadcast
 - runtime readiness/degraded-state reporting (`/runtime/status`)
+- cryptographic verification and lifecycle management of prebuilt VM attributes
 
 All the client input is untrusted hints and must be re-validated.
 
@@ -23,27 +24,16 @@ All the client input is untrusted hints and must be re-validated.
 ### Host
 
 - `cmd/enclave/main.go`
+- `cmd/enclave/bundle/bundle.go`
 - `pkg/host/proxy/proxy.go`
 - `pkg/host/policy/`
 - `pkg/host/audit/log_writer.go`
 - `pkg/host/vmm/`
 
-### Guest
-
-- `cmd/guest-init/main.go`
-- `cmd/guest-init/bpf/trace.c`
-
 ### API and Schema
 
 - `api/v1/agent.proto`
 - `schema.sql`
-
-### Deploy
-
-- `deploy/compose.yaml`
-- `deploy/.env.example`
-- `redeploy.sh`
-- `deploy/doctor_rootless.sh`
 
 ## Policy Engine (Implemented)
 
@@ -58,8 +48,8 @@ All the client input is untrusted hints and must be re-validated.
 
 - `go test ./...`
 - `./build_release.sh`
-- `./redeploy.sh`
-- `./deploy/doctor_rootless.sh`
+- `./redeploy.sh` (if available, mostly local scripting cleanup pending)
+- `enclave image pull && enclave image verify` (CLI tooling)
 
 ## Working Rules
 
