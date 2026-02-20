@@ -1,0 +1,94 @@
+syntax = "proto3";
+
+package agent.v1;
+
+option go_package = "enclave/api/v1;agentv1";
+
+service AgentService {
+  // Spawns a new secure microVM
+  rpc StartSession(StartRequest) returns (SessionResponse);
+  
+  // Sends a tool execution request to a specific VM
+  rpc ExecuteTool(ToolRequest) returns (ToolResponse);
+  
+  // Force kills a VM (Panic Button)
+  // Force kills a VM (Panic Button)
+  rpc StopSession(StopRequest) returns (StopResponse);
+
+  // Read-Path: Query aggregated audit logs
+  rpc GetAuditLogs(GetAuditLogsRequest) returns (GetAuditLogsResponse);
+
+  // Dynamic Policy Injection (Vsock)
+  rpc ApplyPolicy(ApplyPolicyRequest) returns (ApplyPolicyResponse);
+}
+
+message StartRequest {
+  string session_id = 1;
+  // Optional: override default resources
+  int32 vcpu = 2;
+  int32 memory_mb = 3;
+}
+
+message SessionResponse {
+  string session_id = 1;
+  string status = 2; // "BOOTING", "READY", "FAILED"
+  string socket_path = 3;
+}
+
+message ToolRequest {
+  string session_id = 1;
+  string tool_name = 2; // e.g. "bash", "python"
+  string input = 3;
+  int32 timeout_seconds = 4;
+  string policy_id = 5;
+  string context_json = 6;
+}
+
+message ToolResponse {
+  string output = 1;
+  string error = 2;
+  int32 exit_code = 3;
+  repeated SyscallLog syscall_logs = 4;
+}
+
+message SyscallLog {
+  int64 timestamp = 1; // Unix nanos
+  string name = 2;     // e.g. "openat"
+  string args = 3;     // formatted args string
+  int32 pid = 4;
+  string status = 5; // ALLOWED, BLOCKED, ERROR
+  string session_id = 6;
+  string action = 7;
+  string metadata_json = 8;
+  string execution_id = 9;
+  string origin_kind = 10;
+  string origin_conversation_id = 11;
+}
+
+message StopRequest {
+  string session_id = 1;
+}
+
+message StopResponse {
+  bool success = 1;
+}
+
+message GetAuditLogsRequest {
+  string session_id = 1; // Optional: filter by session
+  int64 since_timestamp = 2; // Optional: nanoseconds epoch
+  int32 limit = 3;
+}
+
+message GetAuditLogsResponse {
+  repeated SyscallLog logs = 1;
+}
+
+message ApplyPolicyRequest {
+  string session_id = 1;
+  string policy_yaml = 2;
+}
+
+message ApplyPolicyResponse {
+  bool success = 1;
+  string error = 2;
+}

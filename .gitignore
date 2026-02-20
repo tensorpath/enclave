@@ -1,0 +1,15 @@
+deploy/.env
+build/
+dist/
+__pycache__/
+tests/__pycache__/
+*.pyc
+release-*/
+/enclave
+/firecracker
+/vmlinux
+/vmlinux*
+/guest-init
+/rootfs.cpio
+kernel-build
+cmd/enclave/bundle/assets/
