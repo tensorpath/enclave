@@ -20,21 +20,22 @@ The typical way to run Enclave is via the pre-compiled, verifiable releases. The
 
 ### 1. Download & Extract
 
-Download the latest version from the [Releases](https://github.com/tensorpath/enclave/releases) page for your architecture.
+Download the latest version and install it to `/usr/local/bin` for easy access.
 
 ```bash
-# Example for Linux AMD64
-curl -L -o enclave https://github.com/tensorpath/enclave/releases/download/enclave-v1.0.0/enclave_linux_amd64
+# Download the Linux AMD64 binary
+curl -L -o enclave https://github.com/tensorpath/enclave/releases/latest/download/enclave_linux_amd64
 chmod +x enclave
+sudo mv enclave /usr/local/bin/enclave
 ```
 
 ### 2. Run the Orchestrator
 
-When you launch Enclave, it will automatically pull the necessary signed image artifacts and start the hypervisor server.
+When you launch Enclave, it will automatically pull the necessary signed image artifacts and start the hypervisor server. You can use the `-d` flag to easily background the process.
 
 ```bash
-# Start host API (listens on :7339)
-./enclave up
+# Start host API in the background (listens on :7339)
+enclave up -d
 ```
 
 ---
@@ -44,6 +45,7 @@ When you launch Enclave, it will automatically pull the necessary signed image a
 The `enclave` binary provides a CLI for managing the lifecycle and the local image cache.
 
 - `enclave up`: Start the hypervisor API server.
+  - `-d`: Run in the background as a daemon.
   - `--cpu=1` / `--mem=2048`: Adjust VM resources.
   - `--provider=auto`: Automatically detect KVM backend (`native`, `lima`, or `wsl2`).
   - `--socket`: Location for the VM socket path.

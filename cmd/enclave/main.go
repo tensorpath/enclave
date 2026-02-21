@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -31,6 +32,7 @@ import (
 	"enclave/pkg/host/vmm"
 	"enclave/pkg/shared/logger"
 
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/content/file"
 	"oras.land/oras-go/v2/registry/remote"
@@ -153,9 +155,33 @@ func runUp(args []string) error {
 	socket := fs.String("socket", "/tmp/enclave.sock", "Path to VSock socket")
 	policyPath := fs.String("policy", "", "Path to policy YAML file")
 	provider := fs.String("provider", "auto", "Runtime provider: auto|native|lima|wsl2")
+	daemonize := fs.Bool("d", false, "Run in background as a daemon")
 
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+
+	if *daemonize {
+		var childArgs []string
+		for _, arg := range os.Args[1:] {
+			if arg != "-d" && arg != "--d" { // filter out daemon flag
+				childArgs = append(childArgs, arg)
+			}
+		}
+
+		cmd := exec.Command(os.Args[0], childArgs...)
+		cmd.Stdin = nil
+		cmd.Stdout = nil
+		cmd.Stderr = nil
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			Setsid: true, // create a new session
+		}
+
+		if err := cmd.Start(); err != nil {
+			return fmt.Errorf("failed to start daemon: %w", err)
+		}
+		uiDone(fmt.Sprintf("Enclave started in background (PID: %d)", cmd.Process.Pid))
+		return nil
 	}
 
 	selectedProvider, err := resolveProvider(*provider)
@@ -176,7 +202,19 @@ func runUp(args []string) error {
 	}
 
 	if err := hydrator.EnsureAssets(); err != nil {
-		return fmt.Errorf("failed to hydrate assets: %w", err)
+		log.Info("Assets missing or incomplete. Auto-hydrating from hub...")
+		pullArgs := []string{
+			"--install=true",
+			"--verify=false",
+			"--dest-dir", filepath.Join(os.TempDir(), "enclave-bootstrap"),
+			"--cache-dir", hydrator.CacheDir,
+		}
+		if pullErr := runImagePull(pullArgs); pullErr != nil {
+			return fmt.Errorf("auto-hydration failed: %w (original ensure error: %v)", pullErr, err) // Note: this calls image pull recursively basically but through the function directly
+		}
+		if checkErr := hydrator.EnsureAssets(); checkErr != nil {
+			return fmt.Errorf("assets still missing after auto-hydration: %w", checkErr)
+		}
 	}
 
 	// 2. Load Policy
@@ -981,13 +1019,7 @@ func downloadOCI(rawURL, destDir string, update func(current, total int64)) (int
 		return 0, fmt.Errorf("oras resolve: %w", err)
 	}
 
-	// 2. Do the actual pull
-	_, err = oras.Copy(ctx, repo, repo.Reference.ReferenceOrDefault(), store, repo.Reference.ReferenceOrDefault(), oras.DefaultCopyOptions)
-	if err != nil {
-		return 0, fmt.Errorf("oras copy: %w", err)
-	}
-	
-	// 3. Extract uncompressed sizes from Manifest (we read it from the remote first to count bytes accurately)
+	// 2. Extract uncompressed sizes from Manifest (we read it from the remote first to count bytes accurately)
 	_, manifestBytes, err := oras.FetchBytes(ctx, repo, desc.Digest.String(), oras.DefaultFetchBytesOptions)
 	if err != nil {
 		return desc.Size, nil // Fallback to manifest size if we can't extract layers
@@ -1013,10 +1045,18 @@ func downloadOCI(rawURL, destDir string, update func(current, total int64)) (int
 		return desc.Size, nil
 	}
 
-	if update != nil {
-		update(total, total) // Immediately bump to 100% since Oras doesn't provide a streaming copy writer out of the box
+	ts := &TrackingStore{
+		Store:  store,
+		update: update,
+		total:  total,
 	}
 
+	// 3. Do the actual pull with tracked stream wrapper
+	_, err = oras.Copy(ctx, repo, repo.Reference.ReferenceOrDefault(), ts, repo.Reference.ReferenceOrDefault(), oras.DefaultCopyOptions)
+	if err != nil {
+		return 0, fmt.Errorf("oras copy: %w", err)
+	}
+	
 	return total, nil
 }
 
@@ -1163,6 +1203,41 @@ func (tw *trackingWriter) Write(p []byte) (int, error) {
 		tw.update(tw.cur, tw.total)
 	}
 	return n, err
+}
+
+type TrackingStore struct {
+	*file.Store
+	update func(current, total int64)
+	total  int64
+	cur    int64
+}
+
+func (s *TrackingStore) Push(ctx context.Context, expected ocispec.Descriptor, content io.Reader) error {
+	tr := &trackingReader{
+		r:      content,
+		update: s.update,
+		total:  s.total,
+		cur:    &s.cur,
+	}
+	return s.Store.Push(ctx, expected, tr)
+}
+
+type trackingReader struct {
+	r      io.Reader
+	update func(current, total int64)
+	total  int64
+	cur    *int64
+}
+
+func (tr *trackingReader) Read(p []byte) (n int, err error) {
+	n, err = tr.r.Read(p)
+	if n > 0 {
+		*tr.cur += int64(n)
+		if tr.update != nil {
+			tr.update(*tr.cur, tr.total)
+		}
+	}
+	return
 }
 
 func detectColorTTY() bool {
