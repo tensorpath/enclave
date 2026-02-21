@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -471,11 +472,10 @@ func runImagePull(args []string) error {
 			return fmt.Errorf("resolve %s url: %w", name, err)
 		}
 		dst := filepath.Join(*destDir, name)
-		uiStep("Downloading", name)
 		var n int64
-		err = withSpinner("downloading "+name, func() error {
+		err = withProgress("Downloading", name, func(update func(current, total int64)) error {
 			var dlErr error
-			n, dlErr = downloadToFile(artifactURL, dst)
+			n, dlErr = downloadToFile(artifactURL, dst, update)
 			return dlErr
 		})
 		if err != nil {
@@ -488,7 +488,6 @@ func runImagePull(args []string) error {
 			Size:     humanBytes(n),
 			Status:   "ok",
 		})
-		uiOK(name, fmt.Sprintf("%s written", humanBytes(n)))
 		downloaded++
 	}
 	if downloaded == 0 {
@@ -504,11 +503,10 @@ func runImagePull(args []string) error {
 			continue
 		}
 		// Treat components as OCI targets
-		uiStep("Pulling Component", compName)
 		var cmpBytes int64
-		err = withSpinner("pulling " + compName, func() error {
+		err = withProgress("Pulling", compName, func(update func(current, total int64)) error {
 			var pullErr error
-			cmpBytes, pullErr = downloadOCI(compRawURL, *destDir)
+			cmpBytes, pullErr = downloadOCI(compRawURL, *destDir, update)
 			return pullErr
 		})
 		if err != nil {
@@ -522,7 +520,6 @@ func runImagePull(args []string) error {
 			Size:     humanBytes(cmpBytes),
 			Status:   "ok",
 		})
-		uiOK(compName, fmt.Sprintf("%s pulled", humanBytes(cmpBytes)))
 		compDownloaded++
 	}
 	if compDownloaded > 0 {
@@ -584,7 +581,7 @@ func runImageVerify(args []string) error {
 		p := filepath.Join(*bundleDir, name)
 		uiStep("Hashing", name)
 		var got string
-		err := withSpinner("hashing "+name, func() error {
+		err := withProgress("Hashing", name, func(update func(c, t int64)) error {
 			var hashErr error
 			got, hashErr = sha256File(p)
 			return hashErr
@@ -652,7 +649,7 @@ func runImageInstall(args []string) error {
 
 	kernelDst := filepath.Join(h.CacheDir, "vmlinux")
 	uiStep("Installing", "vmlinux")
-	if err := withSpinner("installing vmlinux", func() error {
+	if err := withProgress("Installing", "vmlinux", func(update func(c, t int64)) error {
 		return copyFile(kernelSrc, kernelDst)
 	}); err != nil {
 		return fmt.Errorf("install kernel: %w", err)
@@ -663,13 +660,13 @@ func runImageInstall(args []string) error {
 	rootfsDst := filepath.Join(h.CacheDir, "rootfs.cpio")
 	uiStep("Installing", "rootfs.cpio")
 	if strings.HasSuffix(rootfsSrc, ".gz") {
-		if err := withSpinner("decompressing rootfs.cpio.gz", func() error {
+		if err := withProgress("Decompressing", "rootfs.cpio.gz", func(update func(c, t int64)) error {
 			return gunzipFile(rootfsSrc, rootfsDst)
 		}); err != nil {
 			return fmt.Errorf("install rootfs: %w", err)
 		}
 	} else {
-		if err := withSpinner("installing rootfs.cpio", func() error {
+		if err := withProgress("Installing", "rootfs.cpio", func(update func(c, t int64)) error {
 			return copyFile(rootfsSrc, rootfsDst)
 		}); err != nil {
 			return fmt.Errorf("install rootfs: %w", err)
@@ -923,7 +920,7 @@ func fetchHubRelease(indexURL string) (*hubRelease, error) {
 	return &idx.Latest, nil
 }
 
-func downloadToFile(rawURL, dst string) (int64, error) {
+func downloadToFile(rawURL, dst string, update func(current, total int64)) (int64, error) {
 	resp, err := http.Get(rawURL)
 	if err != nil {
 		return 0, err
@@ -938,7 +935,14 @@ func downloadToFile(rawURL, dst string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	n, err := io.Copy(out, resp.Body)
+
+	tw := &trackingWriter{
+		w:      out,
+		update: update,
+		total:  resp.ContentLength,
+	}
+
+	n, err := io.Copy(tw, resp.Body)
 	if err != nil {
 		out.Close()
 		return 0, err
@@ -956,7 +960,7 @@ func downloadToFile(rawURL, dst string) (int64, error) {
 	return n, nil
 }
 
-func downloadOCI(rawURL, destDir string) (int64, error) {
+func downloadOCI(rawURL, destDir string, update func(current, total int64)) (int64, error) {
 	ctx := context.Background()
 	ref := strings.TrimPrefix(rawURL, "oci://") // optional prefix
 	repo, err := remote.NewRepository(ref)
@@ -971,16 +975,63 @@ func downloadOCI(rawURL, destDir string) (int64, error) {
 	}
 	defer store.Close()
 
-	desc, err := oras.Copy(ctx, repo, repo.Reference.ReferenceOrDefault(), store, repo.Reference.ReferenceOrDefault(), oras.DefaultCopyOptions)
+	// 1. Resolve to get manifest descriptor
+	desc, err := repo.Resolve(ctx, repo.Reference.ReferenceOrDefault())
+	if err != nil {
+		return 0, fmt.Errorf("oras resolve: %w", err)
+	}
+
+	// 2. Do the actual pull
+	_, err = oras.Copy(ctx, repo, repo.Reference.ReferenceOrDefault(), store, repo.Reference.ReferenceOrDefault(), oras.DefaultCopyOptions)
 	if err != nil {
 		return 0, fmt.Errorf("oras copy: %w", err)
 	}
 	
-	// Try to sum up the size of grabbed files (this is an approximation, desc size is for the manifest bundle usually)
-	// We'll just return the total layers size downloaded or the manifest size. 
-	// Oras doesn't easily return total bytes from Copy as a single int64, so we will use the size of the descriptor.
-	// We could also do filepath.Walk to find what was un-tarred/copied. For now, returning desc.Size is fine.
-	return desc.Size, nil
+	// 3. Extract uncompressed sizes from Manifest (we read it from the remote first to count bytes accurately)
+	_, manifestBytes, err := oras.FetchBytes(ctx, repo, desc.Digest.String(), oras.DefaultFetchBytesOptions)
+	if err != nil {
+		return desc.Size, nil // Fallback to manifest size if we can't extract layers
+	}
+
+	var m struct {
+		Config struct {
+			Size int64 `json:"size"`
+		} `json:"config"`
+		Layers []struct {
+			Size int64 `json:"size"`
+		} `json:"layers"`
+	}
+	if err := json.Unmarshal(manifestBytes, &m); err != nil {
+		return desc.Size, nil
+	}
+
+	total := m.Config.Size
+	for _, l := range m.Layers {
+		total += l.Size
+	}
+	if total == 0 {
+		return desc.Size, nil
+	}
+
+	if update != nil {
+		update(total, total) // Immediately bump to 100% since Oras doesn't provide a streaming copy writer out of the box
+	}
+
+	return total, nil
+}
+
+func dirSize(path string) (int64, error) {
+	var size int64
+	err := filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			size += info.Size()
+		}
+		return nil
+	})
+	return size, err
 }
 
 func resolveArtifactURL(indexURL, raw string) (string, error) {
@@ -1039,15 +1090,30 @@ func fileSizeHuman(path string) string {
 	return humanBytes(st.Size())
 }
 
-func withSpinner(label string, fn func() error) error {
+func withProgress(action, name string, fn func(update func(current, total int64)) error) error {
 	if !uiSpinnerEnabled {
-		return fn()
+		return fn(func(c, t int64) {})
 	}
 	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	var currentBytes atomic.Int64
+	var totalBytes atomic.Int64
+	startTime := time.Now()
+
+	updateFn := func(current, total int64) {
+		currentBytes.Store(current)
+		if total > 0 {
+			totalBytes.Store(total)
+		}
+	}
+
 	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
 
 	go func() {
+		defer wg.Done()
+		defer ticker.Stop()
 		frames := []string{"|", "/", "-", "\\"}
 		i := 0
 		for {
@@ -1058,14 +1124,45 @@ func withSpinner(label string, fn func() error) error {
 			case <-ticker.C:
 				frame := frames[i%len(frames)]
 				i++
-				fmt.Printf("\r%s %s", paint(frame, "cyan"), label)
+				cur := currentBytes.Load()
+				tot := totalBytes.Load()
+				elapsed := time.Since(startTime).Seconds()
+				rate := 0.0
+				if elapsed > 0 {
+					rate = float64(cur) / elapsed
+				}
+
+				if tot > 0 {
+					fmt.Printf("\r\033[K%s %s: %s (%s / %s | %s/s)", paint(frame, "cyan"), action, paint(name, "bold"), humanBytes(cur), humanBytes(tot), humanBytes(int64(rate)))
+				} else if cur > 0 {
+					fmt.Printf("\r\033[K%s %s: %s (%s | %s/s)", paint(frame, "cyan"), action, paint(name, "bold"), humanBytes(cur), humanBytes(int64(rate)))
+				} else {
+					fmt.Printf("\r\033[K%s %s: %s", paint(frame, "cyan"), action, paint(name, "bold"))
+				}
 			}
 		}
 	}()
 
-	err := fn()
+	err := fn(updateFn)
 	close(done)
+	wg.Wait()
 	return err
+}
+
+type trackingWriter struct {
+	w      io.Writer
+	update func(current, total int64)
+	total  int64
+	cur    int64
+}
+
+func (tw *trackingWriter) Write(p []byte) (int, error) {
+	n, err := tw.w.Write(p)
+	tw.cur += int64(n)
+	if tw.update != nil {
+		tw.update(tw.cur, tw.total)
+	}
+	return n, err
 }
 
 func detectColorTTY() bool {
